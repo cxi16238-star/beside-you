@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4338ca"/>
+      <stop offset="0.55" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#c026d3"/>
+    </linearGradient>
+    <linearGradient id="iris" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbcfe8"/>
+      <stop offset="1" stop-color="#f472b6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+
+  <!-- 眼白：看屏幕的眼睛 -->
+  <path d="M40 128C67 78 108 54 128 54s61 24 88 74c-27 50-68 74-88 74s-61-24-88-74z"
+        fill="#ffffff" opacity="0.16"/>
+  <path d="M40 128C67 78 108 54 128 54s61 24 88 74c-27 50-68 74-88 74s-61-24-88-74z"
+        fill="none" stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 虹膜：粉色瞳孔 -->
+  <circle cx="128" cy="128" r="31" fill="url(#iris)"/>
+  <circle cx="128" cy="128" r="12.5" fill="#4c1d95"/>
+
+  <!-- 高光 -->
+  <circle cx="139" cy="117" r="6.5" fill="#ffffff" opacity="0.9"/>
+
+  <!-- 右上角小星星：陪看 + 说话 -->
+  <path d="M198 56l7 17 17 7-17 7-7 17-7-17-17-7 17-7z" fill="#fde68a"/>
+  <circle cx="62" cy="192" r="5" fill="#f9a8d4"/>
+</svg>

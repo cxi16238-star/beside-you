@@ -1,0 +1,13 @@
+{
+  "name": "her-company",
+  "description": "Her Company：陪你看屏幕的伙伴（原 dsh-see-now-plus）—— 小窗会话绑定、全局快捷键开关陪看、DSH 获焦暂停与自动续看、静音与实时音量、背景透明度。Fork of dsh-see-now 0.2.0.",
+  "version": "0.13.11",
+  "entry": {
+    "name": "her-company",
+    "inject": [
+      "sessionController",
+      "tools",
+      "attachments"
+    ]
+  }
+}
