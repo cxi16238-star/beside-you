@@ -196,6 +196,8 @@ def cache_dir() -> Path:
 
 
 CHAT_FILE = cache_dir() / "chat.jsonl"
+# mic.py 正在说的这半句（实时转写）：窗口拿去弹那条"输入框"，边说你边看见字
+MIC_PARTIAL = CHAT_FILE.parent / "mic-partial.json"
 CONFIG = Path(os.environ.get("DSH_HOME") or os.path.expanduser("~/.dsh")) / "watch-window.json"
 MIC_SCRIPT = HERE / "mic.py"
 
@@ -283,7 +285,7 @@ def capturable() -> bool:
     """录屏 / 截图能不能拍到窗口。
 
     默认**不能**：走 `WDA_EXCLUDEFROMCAPTURE`，窗口不会出现在截图、直播、共享屏幕里。
-    要给别人看效果就在 `~/.dsh/watch-window.json` 写 `{ "capturable": true }`。
+    要给别人看效果（录视频）就在 `~/.dsh/watch-window.json` 写 `{ "capturable": true }`。
     环境变量 `DSH_GLASS_WDA=0` 只对这一次启动有效（插件拉起窗口时不传环境变量）。
     """
     if os.environ.get("DSH_GLASS_WDA") == "0":
@@ -691,6 +693,9 @@ class LiveGlass:
 
         self.feed = ChatFeed(CHAT_FILE)
         self._mic_proc = None
+        # 实时转写预览（mic-partial.json）：说话时弹出的那条"输入框"
+        self._live_box = None
+        self._live_text = ""
         self._protocol = WindowProtocol() if WindowProtocol is not None else None
         # 告诉宿主"窗起来了"：它会据此把二 / 三号开关恢复成上次开窗时的状态
         # （关窗时三个开关全关、同时记下记忆，恢复只能发生在新进程起来之后）
@@ -1266,7 +1271,10 @@ class LiveGlass:
             if self._mic_proc is not None and self._mic_proc.poll() is not None:
                 self._mic_proc = None
                 self.feed.status = ""
+                self._hide_live_text()
                 self._refresh_feed()
+            elif self._mic_proc is not None:
+                self._poll_live_text()
             if self.feed.poll():
                 # meta 行（诊断、宿主报错）**不再往标题栏弹绿字**（用户明确要求）。
                 # 它仍然记在 `feed.status` 里、也还在日志里，只是不打扰。
@@ -1355,6 +1363,22 @@ class LiveGlass:
             "mic": [str(k) for k in (hk.get("mic") or [])],
             "input": [str(k) for k in (hk.get("input") or [])],
         }
+        # 录屏模式热切换：capturable 一变就解除/恢复系统截屏排除（不用重开窗）。
+        # 排除状态也同步给抓屏源：解除后拍到自己那一块会自动填掉，画面不会花。
+        want_cap = capturable() or not IS_WIN
+        if want_cap != getattr(self, "_cappable", False):
+            self._cappable = want_cap
+            try:
+                src = getattr(self, "_source", None)
+                if src is not None:
+                    src.cappable = want_cap
+            except Exception:
+                pass
+            if not self._static and not self._solid:
+                try:
+                    self._set_exclude(not want_cap)
+                except Exception:
+                    pass
         # 状态行单独比：它变得比样式勤（每次开停、切窗口都写一次盘），
         # 但绝大多数时候只是几个布尔，重排一次标题栏就够了。
         st = status_of(cfg)
@@ -1555,8 +1579,10 @@ class LiveGlass:
                 si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 si.wShowWindow = subprocess.SW_HIDE
                 flags = 0x08000000          # CREATE_NO_WINDOW
+            # `--engine auto`：装了 SenseVoice 就用它（中英混说、噪声、标点都更好），
+            # 没装自动退回 paraformer。以前这里写死 `local`，换了模型也用不上。
             self._mic_proc = subprocess.Popen(
-                [asr_python(), str(MIC_SCRIPT), "--engine", "local"],
+                [asr_python(), str(MIC_SCRIPT), "--engine", "auto"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=flags, startupinfo=si,
             )
@@ -4471,6 +4497,86 @@ class LiveGlass:
             self.text.refresh()
         except Exception:
             pass
+
+
+    # ---- 实时转写预览：说话时弹一条"输入框"，字跟着出来 ----
+
+    def _poll_live_text(self) -> None:
+        """读 mic-partial.json：有内容就把预览框展开，空了/过期就收起。"""
+        try:
+            raw = json.loads(MIC_PARTIAL.read_text(encoding="utf-8"))
+        except Exception:
+            self._hide_live_text()
+            return
+        try:
+            fresh = time.time() * 1000 - float(raw.get("at") or 0) < 1600
+        except Exception:
+            fresh = False
+        text = str(raw.get("text") or "").strip()
+        if fresh and text:
+            self._show_live_text(text)
+        else:
+            self._hide_live_text()
+
+    def _show_live_text(self, text: str) -> None:
+        """在输入按钮上方弹一条只读预览（跟"字"那条弹框同款、不抢焦点）。
+
+        为什么不复用 `_toggle_text_popup()`：那条要 `focus_force()`、FocusOut 就关，
+        说话时一打字/一点别处就没了；预览是纯展示，不能跟用户的输入抢。
+        """
+        if text == self._live_text and self._live_box is not None:
+            try:
+                if self._live_box.state() == "normal":
+                    return                          # 同一句、框还开着：别重画，会闪
+            except Exception:
+                return
+        self._live_text = text
+        try:
+            fs = max(11, int(self._ui["fontSize"]))
+            top = self._live_box
+            if top is None:
+                top = tk.Toplevel(self.root)
+                top.overrideredirect(True)
+                top.attributes("-topmost", True)
+                top.configure(bg=KEY)
+                if IS_WIN:
+                    top.attributes("-transparentcolor", KEY)
+                c = tk.Canvas(top, width=320, height=44, bg=KEY,
+                              highlightthickness=0, bd=0)
+                c.pack()
+                self._live_box, self._live_canvas = top, c
+            c = self._live_canvas
+            pad = 10
+            font = self.fonts.spec(fs)
+            # 先量一次：按文字实际大小定框（比固定宽度自然，短句不会拖一条长条）
+            tid = c.create_text(pad, pad, text=text, width=300, anchor="nw",
+                                fill="#eef6ff", font=font)
+            x1, y1, x2, y2 = c.bbox(tid)
+            w = max(180, min(320, x2 + pad))
+            h = max(36, y2 + pad)
+            c.delete(tid)
+            c.configure(width=w, height=h)
+            c.delete("all")
+            c.create_rectangle(0, 0, w, h, fill=self._style_colors()[2], outline="")
+            c.create_text(pad, pad, text=text, width=w - 2 * pad, anchor="nw",
+                          fill="#eef6ff", font=font)
+            (_tx, _ty), _mc, cy = self._input_points()
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            top.geometry(f"{w}x{h}+{rx + int(_tx) - 6}+{ry + int(cy) - h - 12}")
+            top.deiconify()
+            top.lift()
+        except Exception:
+            pass
+
+    def _hide_live_text(self) -> None:
+        if getattr(self, "_live_text", ""):
+            self._live_text = ""
+        top = getattr(self, "_live_box", None)
+        if top is not None:
+            try:
+                top.withdraw()
+            except Exception:
+                pass
 
     def _enter_text_btn(self, _e=None) -> None:
         if getattr(self, "_hover_text", False):

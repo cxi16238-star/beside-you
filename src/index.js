@@ -24,6 +24,7 @@ import { hotkeyText } from './hotkeys.js';
 // `wakeSession` 是小窗说话那条桥唯一该用的叫醒方式：它不抛、不排队、失败有日志
 import { wakeSession } from './timer.js';
 import { planOffload, planOffloadWithTrigger, applyOffload } from './offload.js';
+import { fetchVideo } from './fetch-video.js';
 import { defineToolCompat } from './define-tool.js';
 import { createSettingsApi, ROUTE_PREFIX } from './settings-api.mjs';
 import { windowAlive, windowHidden, setWindowHidden, hiddenForShow, windowReport, windowLine,
@@ -50,7 +51,14 @@ const nodeRequire = createRequire(import.meta.url);
  * @returns {{src: object|null, error?: string}}
  */
 function srcOf(args) {
-  const kind = args.source ? String(args.source).toLowerCase() : null;
+  /**
+   * 只给 `path` 不给 `source` 时按**文件回放**算。
+   *
+   * 以前这里是 `args.source ? … : null`，于是 `see_now({action:"start", path:"x.mp4"})`
+   * 会静默退化成 `{kind:'screen'}` —— 用户以为在看那个视频，其实在抓整屏，
+   * 而且没有任何报错。这类"看起来成功了、其实做的是另一件事"是最坏的失败。
+   */
+  const kind = args.source ? String(args.source).toLowerCase() : (args.path ? 'file' : null);
   // `source:"portal"` 是 Linux 采集的调试别名（不写进工具说明，省常驻 token）：
   // 语义和 `source:"screen"` 完全一样，只是把引擎钉死在 portal、不再自动探测。
   if (kind === 'portal') return { src: { kind: 'screen', engine: 'portal' } };
@@ -472,7 +480,7 @@ function sheetText(sheet, { waited = 0, partial = false, userText = null, say = 
   // 常驻模式要**明说**，否则模型会以为"还得我自己再调一次"，或者以为"看一眼就完事了"
   const loopNote = looping
     ? '\n**已经进入常驻模式**：下一张攒够我会再叫你，不用你现在就调下一次。'
-      + '你现在只要做一件事 —— 值得说就用 `say` 说一句，不值得说就别出声。'
+      + '不要每个画面都说话：一段剧情里顶多一两句，只在真有东西想说的时候才开口；没意思就一声不吭，沉默是对的。'
       + '用户关掉悬浮窗我就停。'
     : '';
   return `${head}\n${lines.join('\n')}${linesText(sheet)}${changeText(sheet.changes)}${ask}${lastSaidNote()}${muteNote()}${loopNote}\n（${whyText}；想看下一段就再调一次 \`see_now({action:"watch"})\`。）${replyReminder({ answered: Boolean(say) })}`;
@@ -960,7 +968,13 @@ async function registerAll(ctx) {
       const off = ctx.on('session/event', (session, event) => {
         const id = session?.header?.id ?? session?.id;
         if (id) lastSessionId = id;
-        mirrorAssistantText(event, id ?? null);
+        // 2026-11-09 哥哥定的：小窗气泡只放 `say`，正文不放。
+        // 原话「有些是你想给我听的，有些是你自己的思考 —— 气泡只要播报你想 say 的就行，
+        // 和语音播报一样的内容，其他的不用放出来」。
+        // 正文 DSH 自己的会话记录里是完整的，这里不再镜像，免得气泡变成流水账。
+        // 要开回来就把下面这行的注释去掉（mirrorAssistantText 本体保留）。
+        // mirrorAssistantText(event, id ?? null);
+        void mirrorAssistantText;
       });
       if (typeof off === 'function') disposers.push(off);
     } catch (e) {
@@ -1749,10 +1763,22 @@ async function registerAll(ctx) {
       const buf = Buffer.alloc(len);
       const fd = openSync(outboxFile, 'r');
       try { readSync(fd, buf, 0, len, outboxPos); } finally { closeSync(fd); }
-      outboxPos = st.size;
       chunk = buf.toString('utf8');
     } catch { return; }
-    for (const line of chunk.split('\n')) {
+    /**
+     * ⚠️ **只消费到最后一个换行**，而不是把 `outboxPos` 直接推到文件末尾。
+     *
+     * 窗口那边是边写边 flush 的，我们 400ms 轮一次，很容易正好读到写了一半的那一行。
+     * 以前这里先 `outboxPos = st.size` 再解析 —— 半行解析失败 `continue`，位置却已经
+     * 越过去了：那条动作（比如"用户关了陪看"）**永远丢掉**，窗口那边的点击看起来没反应。
+     *
+     * 半行留到下一拍：那时它已经补全，从半行开头重新读即可（所以位置只能停在换行处）。
+     */
+    const cut = chunk.lastIndexOf('\n');
+    if (cut < 0) return;                    // 一个完整行都还没有，等下一次
+    const consumed = chunk.slice(0, cut + 1);
+    outboxPos += Buffer.byteLength(consumed, 'utf8');
+    for (const line of consumed.split('\n')) {
       if (!line.trim()) continue;
       let msg;
       try { msg = JSON.parse(line); } catch { continue; }
@@ -1814,6 +1840,45 @@ async function registerAll(ctx) {
     const text = typeof value.text === 'string' ? value.text : '';
     return { ...value, text: text ? `${note}\n\n${text}` : note };
   };
+
+  /**
+   * url → 本地缓存的下载桥。**只在 watch / start 两个入口调**（peek / seek 等跟来源无关）。
+   *
+   * 给 url 就先下载到 `<chatDir>/video/`（yt-dlp），再把 `path` 交给现有 file 分支 ——
+   * 之后的抽帧、拼图、分档、seek 全部沿用，一行都不动。
+   *
+   * 三条规则都按任务书来：
+   *   - url 只在 source 缺省或 "file" 时生效，screen / camera / obs 一律忽略 + 提示；
+   *   - url 和 path 同时给，以 url 为准 + 提示；
+   *   - 下载失败返回 `{ error }`，由调用方直接当成工具结果交出去 —— 不抛、不卡。
+   *
+   * @returns {Promise<{args:object, note?:string, usedUrl?:boolean, error?:{code:string, text:string}}>}
+   */
+  async function resolveUrlArgs(args, signal) {
+    const rawUrl = args.url ? String(args.url).trim() : '';
+    if (!rawUrl) return { args };
+    const kind = args.source ? String(args.source).toLowerCase() : null;
+    if (kind && kind !== 'file') {
+      return {
+        args,
+        note: `这次给了 url，但 source:"${kind}" 是实况采集 —— 链接只在 source 缺省或 "file" 时才会下载。`
+          + `这次忽略 url，按 ${kind} 采集。`,
+      };
+    }
+    const r = await fetchVideo({ url: rawUrl, quality: args.quality, cacheDir: chatDir(), signal, log });
+    if (!r.ok) return { error: { code: r.code, text: r.message } };
+    const notes = [];
+    if (args.path != null && String(args.path).trim() !== '') notes.push('同时给了 path 和 url，以 url 为准。');
+    notes.push(r.fromCache
+      ? `这次直接用本地缓存（${r.path}），没有重新下载。`
+      : `已下载到本地：${r.path}（${(r.bytes / 1024 / 1024).toFixed(1)} MB）。`);
+    const next = { ...args, path: r.path, source: 'file', url: undefined };
+    if (args.region != null && String(args.region).trim() !== '') {
+      delete next.region;
+      notes.push('给了 region，但下载回放的是本地文件，region 不适用（屏幕采集才有区域）。');
+    }
+    return { args: next, note: notes.join(' '), usedUrl: true };
+  }
 
   const toolObj = {
     ...seeNowToolSpec(),
@@ -1935,6 +2000,17 @@ async function registerAll(ctx) {
         // 也不该把陪看的所有权搬过去。
         const ownerAtStart = talkTarget();
         /**
+         * 链接下载桥（`url`）。必须在 `srcOf` 之前处理：
+         * 下载成功就把 path 交进 file 分支，抽帧/拼图/seek 全沿用；
+         * 下载失败直接当成这一轮的结果交出去 —— 不抛异常、不卡住。
+         */
+        const urlRes = await resolveUrlArgs(args, run?.signal);
+        if (urlRes.error) {
+          return { text: urlRes.error.text, meta: { ok: false, reason: urlRes.error.code } };
+        }
+        const args2 = urlRes.args;
+        if (urlRes.note) pendingModeNote = [urlRes.note, pendingModeNote].filter(Boolean).join('\n\n');
+        /**
          * region 的三个入口，优先级从高到低：
          *   1. `region:"off"` —— 取消（存的那块一起删掉）
          *   2. `region:"x,y,w,h"` —— 这一次用这块（`srcOf` 负责校验和报错）
@@ -1943,9 +2019,9 @@ async function registerAll(ctx) {
          * 第 3 条是这次的重点：**模型不该被要求记住四个数字**。用户框一次，之后
          * 每轮 `watch` 自动就是那块。
          */
-        const rawRegion = typeof args.region === 'string' ? args.region.trim() : '';
+        const rawRegion = typeof args2.region === 'string' ? args2.region.trim() : '';
         const regionOff = /^(off|none|clear)$/i.test(rawRegion);
-        const built = srcOf(regionOff ? { ...args, region: undefined } : args);
+        const built = srcOf(regionOff ? { ...args2, region: undefined } : args2);
         if (built.error) return { text: built.error, meta: { ok: false, reason: 'bad-region' } };
         const src = built.src;
         const stickyRegion = regionOff ? null : (rawRegion ? undefined : loadRegion());
@@ -1995,9 +2071,15 @@ async function registerAll(ctx) {
           seconds,
           minFrames,
           src,
+          // "用户亲口说要看看什么" = 传了 source/path/url。**不能用 `src.kind` 反推**：
+          // 只传 region 时 `srcOf()` 也会补出 `{kind:'screen'}`，那只是换个取景框，
+          // 不该把"关窗后别再自动弹出来"那道闸打开。
+          explicitSource: Boolean(args2.source || args2.path || args2.url),
           // 存下来的那块（undefined = 这次没提，保持原样；null = 显式取消）
           region: regionOff ? null : stickyRegion,
-          quality: args.quality ? String(args.quality).toLowerCase() : null,
+          // 走了 url 下载时，quality 只负责"下载哪一档"（medium 这类值不在采集清晰度表里，
+          // 传过去会静默落到 low）—— 所以 url 生效时这里显式传 null，保持当前采集档位。
+          quality: urlRes.usedUrl ? null : (args2.quality ? String(args2.quality).toLowerCase() : null),
           // 逐帧模式：一张图一帧 + 档位固定 1（铺满）；常规按节奏定切点门槛。
           // 参数变了 runner 会自己重开管线。
           opts: {
@@ -2136,12 +2218,19 @@ async function registerAll(ctx) {
       }
 
       if (action === 'start') {
-        const built = srcOf(args);
+        // 和 watch 同一个下载桥：给了 url 就先下到本地，再按 file 起采集。
+        const urlRes = await resolveUrlArgs(args, run?.signal);
+        if (urlRes.error) {
+          return { text: urlRes.error.text, meta: { ok: false, reason: urlRes.error.code } };
+        }
+        const a2 = urlRes.args;
+        const built = srcOf(a2);
         if (built.error) return { text: built.error, meta: { ok: false, reason: 'bad-region' } };
         const r = await runner.start({ src: built.src ?? { kind: 'screen' } });
         return {
-          text: r.already ? '已经在看了。'
-            : `开始看 ${r.source.kind}（引擎 ${r.engine}）${r.warning ? `。⚠️ ${r.warning}` : '。'}`,
+          text: (r.already ? '已经在看了。'
+            : `开始看 ${r.source.kind}（引擎 ${r.engine}）${r.warning ? `。⚠️ ${r.warning}` : '。'}`)
+            + (urlRes.note ? `\n${urlRes.note}` : ''),
           meta: r,
         };
       }

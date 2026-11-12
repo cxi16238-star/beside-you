@@ -66,9 +66,28 @@ export function seeNowToolSpec() {
       + '`seek` with `position` (seconds) / `configure` with `quality`. Screen and camera capture have '
       + 'no notion of pausing or seeking, so those actions are refused explicitly instead of pretending '
       + 'to work.\n\n'
-      + 'Safety net: if you stop calling `watch`, the plugin keeps capturing and wakes you with a short '
-      + 'note when a sheet fills up (then `peek`). It stops the moment the user closes the floating '
-      + 'window and tells you — when that note appears, do NOT call `see_now` again until the user asks.\n\n'
+      + '**Download by link** (`url` + optional `quality`): give a video-page URL and the plugin first '
+      + 'downloads it into a local cache (yt-dlp), then replays it as a local file; calling again with '
+      + 'the same URL reuses the cache. Boundaries: only download what the user explicitly linked — '
+      + 'do not search, do not recommend, do not batch-scrape; no DRM stripping, no region bypass, '
+      + 'no paywall bypass; whether a link can be downloaded depends on the user\'s own authorization.\n\n'
+      + '**`watch` vs `peek` — do not mix them up.** `watch` = watching together: blocking, and you '
+      + 'must call it again after each reply to keep watching. `peek` = one look: returns whatever sheet '
+      + 'is already buffered, without blocking and without changing the watching state — use it when the '
+      + 'plugin wakes you ("有新画面了") or when you only need to confirm what is on screen right now. '
+      + 'Never use `watch` as a poll loop (keep at least ~10s between looks); `peek` has no such limit.\n\n'
+      // 自动收工的判据写在代码里（loop.js 的 shouldGoIdle / stop 原因），agent 看不到源码 ——
+      // 不在这里写清楚，它就会在陪看已经停了以后还装作在看、或者继续调 watch。
+      + '**Watching can stop on its own — and you must tell the user when it does.** The loop ends by '
+      + 'itself when: (1) the user closes the floating window (`window-closed`, immediate); (2) no window '
+      + 'is open and the user has been silent for `idleStopMin` minutes (default 3); (3) '
+      + '`maxAutonomousWakes` consecutive automatic wakes went unanswered (default 8); (4) a local video '
+      + 'finished playing (`ffmpeg-exit`); (5) the user pressed the hotkey or the stop button. '
+      + 'Whenever a result or report says the watching/loop has stopped, say so in your next `say` '
+      + '(e.g. "陪看已经停了，要继续就说一声"), do NOT call `see_now` again until the user asks, and never '
+      + 'pretend you are still watching.\n\n'
+      + 'Safety net: if you stop calling `watch` while the loop is still running, the plugin keeps '
+      + 'capturing and wakes you with a short note when a sheet fills up (then `peek`).\n\n'
       + '**`say` is the ONLY thing the user sees and hears at the moment you say it.** Your normal reply '
       + 'is appended to the window log afterwards (so the record is complete) but is never spoken and '
       + 'never shows up as a bubble on time — only `say` does. So whenever the user might be waiting, '
@@ -137,6 +156,15 @@ export function seeNowToolSpec() {
         type: 'string',
         description: 'With source:"file": absolute path of a video to replay.',
       },
+      url: {
+        type: 'string',
+        description: 'Video-page link (e.g. a bilibili BV page). When given, the plugin first downloads '
+          + 'it into a local cache (yt-dlp, up to 120s), then replays it as a local file — the returned '
+          + 'image is the same 4-frame sheet as `source:"file"`. Mutually exclusive with `path`; if both '
+          + 'are given, `url` wins (the result says so). Only takes effect when `source` is omitted or '
+          + '"file"; with `source:"screen"|"camera"|"obs"` it is ignored (the result says so). '
+          + 'Failures come back as `{ ok:false, code, message }` with a short human explanation, never an exception.',
+      },
       realtime: {
         type: 'boolean',
         description: 'With source:"file": replay at 1x speed instead of as fast as ffmpeg can decode.',
@@ -196,7 +224,9 @@ export function seeNowToolSpec() {
           + 'unreadable) | "standard" (1050×630, medium text) | "high" (1260×756, filenames) | '
           + '"ultra" (1596×924, one frame ≈ the real screen — only when "high" is still not enough).\n'
           + 'Switch it UP as soon as you cannot read something — do not guess from a blurry image. '
-          + 'Changing it restarts capture (~0.6s) and returns one sharp frame now; later calls stay.',
+          + 'Changing it restarts capture (~0.6s) and returns one sharp frame now; later calls stay.\n'
+          + 'With `url`, `quality` means the **download** quality instead: "low" / "medium" (default) / '
+          + '"high" — it only picks which stream to download; a local file is always read as-is.',
       },
     },
     output: {

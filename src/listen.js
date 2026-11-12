@@ -405,7 +405,22 @@ function withoutConsole(exe) {
   }
 }
 
-export async function ensureService(cfg, { log = () => {}, waitMs = 60_000 } = {}) {
+/**
+ * 并发闸：同一时刻只允许一个"拉起服务"流程在跑。
+ *
+ * 三个调用点（`start()`、drain 的 60 秒重试、`pausedUntil` 到点）完全可能挤在一起，
+ * 各起一个就会抢同一个端口；而 `stdio: 'ignore'` 让第二个的失败**完全静默**，
+ * 只留下两份内存/显存占用。后来者直接搭上正在进行的那一次即可。
+ */
+let ensureInFlight = null;
+
+export function ensureService(cfg, opts = {}) {
+  if (ensureInFlight) return ensureInFlight;
+  ensureInFlight = _ensureService(cfg, opts).finally(() => { ensureInFlight = null; });
+  return ensureInFlight;
+}
+
+async function _ensureService(cfg, { log = () => {}, waitMs = 60_000 } = {}) {
   const start = cfg?.manage?.start;
   if (!start) return { ok: false, reason: 'asr.json 里没写 manage.start' };
   if (await probeService(cfg.baseUrl)) return { ok: true, already: true };
@@ -419,11 +434,22 @@ export async function ensureService(cfg, { log = () => {}, waitMs = 60_000 } = {
   const env = { ...process.env };
   const idleMs = Number(cfg?.manage?.idleMs);
   if (Number.isFinite(idleMs) && idleMs > 0) env.ASR_IDLE_EXIT_S = String(idleMs / 1000);
+  let spawnErr = null;
   try {
     // 脚本目录当 cwd：很多服务按相对路径找模型
     const cwd = args[0] ? dirname(args[0]) : undefined;
     const child = spawn(exe, args, {
       detached: true, stdio: 'ignore', windowsHide: true, env, ...(cwd ? { cwd } : {}),
+    });
+    /**
+     * ⚠️ **必须挂 'error'**：spawn 的 ENOENT/EPERM 是**异步事件**，不会进下面那个
+     * try/catch（那个只接同步抛出）。没有监听者时 Node 走
+     * `ERR_UNHANDLED_ERROR` —— 整个宿主进程退出，而不是"本地服务没起来"。
+     * 触发很日常：`asr.json` 的 `manage.start` 指向一个被删掉/换盘的解释器。
+     */
+    child.on('error', (e) => {
+      spawnErr = e;
+      log(`转写服务起不来：${e?.message ?? e}`);
     });
     child.unref();
   } catch (e) {
@@ -433,6 +459,7 @@ export async function ensureService(cfg, { log = () => {}, waitMs = 60_000 } = {
   const until = Date.now() + waitMs;
   while (Date.now() < until) {
     await sleep(1000);
+    if (spawnErr) return { ok: false, reason: `起不来：${spawnErr?.message ?? spawnErr}` };
     if (await probeService(cfg.baseUrl)) return { ok: true, waitedMs: waitMs - (until - Date.now()) };
   }
   return { ok: false, reason: `等了 ${Math.round(waitMs / 1000)} 秒还没就绪` };
@@ -955,6 +982,10 @@ export function createListener({
     if (child) return { ok: true, reason: 'already' };
     // 新的一次听音会话：上一轮的台词不能留到这一轮（issue #39，偏移会是负的）
     buffer.reset();
+    // 同理，上一轮的"失败暂停"和失败计数也得翻篇：否则用户在暂停期内 stop→start，
+    // 新的这一轮前 30 秒 drain() 直接 return，而状态却写着"在听"（字幕静默缺失）。
+    pausedUntil = 0;
+    fails = 0;
     if (env.DSH_SEE_AUDIO === '0') {
       reason = '被 DSH_SEE_AUDIO=0 关掉了';
       enabled = false;
@@ -978,6 +1009,9 @@ export function createListener({
      * 采集和音量条先跑，转写在后台等它就绪 —— 期间的段不删，起来之后照常处理。
      */
     if (transcriber.kind === 'http') {
+      // 记下这一拍：drain 的"60 秒内不重复拉"看的就是这个值。不写的话它一直是 0，
+      // 冷启动 20~30 秒期间第一段转写必然失败，于是又拉起一个（两个进程抢一个端口）。
+      lastEnsureAt = Date.now();
       ensureService(asrConfig(env), { log })
         .then((r) => { if (!r.ok) log(`转写服务没起来：${r.reason}`); })
         .catch(() => { /* 已经在里面兜过了 */ });
@@ -1015,6 +1049,8 @@ export function createListener({
       return { ok: false, reason };
     }
 
+    /** 这一轮起的进程。下面几个回调必须认它 —— 见 exit 里那条守卫。 */
+    const self = child;
     child.stdout?.on('data', (d) => {
       const s = String(d).trim();
       if (s) log(`[listen] ${s.slice(0, 400)}`);
@@ -1024,6 +1060,11 @@ export function createListener({
       if (s) log(`[listen] ${s.slice(-400)}`);
     });
     child.on('exit', (code) => {
+      // ⚠️ 只认"这一轮起的那个进程"。stop() 之后很快又 start()（切设置、重启听音）时，
+      // 老进程的 exit 会晚一步赶到；无条件 child = null 会把**新**进程的引用抹掉，
+      // 并顺手 clearInterval 掉新的 drain 定时器 —— 表现是状态显示"在听"、
+      // Python 也确实在录，但台词永远不出现（drain 已经停了），而且再 stop() 也停不掉它。
+      if (child !== self) return;
       const wasEnabled = enabled;
       child = null;
       enabled = false;

@@ -121,5 +121,7 @@ export function emitSpoken(event) {
 export function __resetSpeech() {
   subscribers.clear();
   BUS.lastEvent = null;
-  seq = 0;
+  // ⚠️ 序号挂在 BUS 上，不是模块里的裸变量。原来这里写的是 `seq = 0`，
+  // ESM 严格模式下那是 ReferenceError（未声明变量赋值），一调就抛。
+  BUS.seq = 0;
 }

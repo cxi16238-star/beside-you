@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.14.0] - 2026-11-12 · 改名 Beside You（带上她的眼睛）+ 语音输入整条链路重做
+
+### Changed
+
+- **包名 `her-company` → `beside-you`**：插件 id、日志前缀（`host.kernel.beside-you`）、
+  客户端样式 id 一并改；设置页显示名改为 **带上她的眼睛**。
+- 语音输入默认走 **SenseVoice-Small**（`--engine auto`：装了就用、没装自动退回
+  paraformer），自带标点与 ITN；`--engine sense|local|http` 仍可强制。
+- 麦克风按**设备原生采样率**打开，再用 soxr（没有则 scipy，再没有则 numpy 窗函数
+  sinc）降到 16k；VAD 判句前补 0.25 秒，`min-sec` 0.35→0.25、`threshold` 0.004→0.003。
+- 切句静音判定 0.45s → **0.75s**：中文词间停顿常被 0.45 误当成句尾，一句话被切碎。
+
+### Fixed
+
+- **回声消除以前从没真正生效**：用 sounddevice 找 loopback 会撞上虚拟设备
+  （Steam Streaming Speakers，打不开）。改用 **PyAudioWPatch** 列 WASAPI loopback，
+  按默认输出设备名匹配；取不到参考时补零，绝不让麦克风卡住。
+- 窗口进程的 stderr 是 DEVNULL，"这句为什么没出来"无法追溯 —— 现在同时写 `mic.log`
+  （超 1MB 滚动）；`mic-record` 开关可把每段 wav 存到 `segments/` 供排查。
+- 修 companion / listen / runner / window / pipeline 等 **25 处**竞态与状态不一致：
+  子进程 exit 回调误清新进程、`seek`/`configure` 读已置空的 source、`takeSheets`
+  先取后滤丢图、`pipeline.finish()` 无人调用、outbox 半行丢动作等。
+
+### Added
+
+- **说话时实时转写预览**：`mic.py` 每 0.45 秒把"正在说的这半句"转一次写进
+  `mic-partial.json`，窗口在输入按钮上方弹一条只读预览框，字跟着出来；说完自动收起。
+- `mic-status.json` 实时状态（音量 / 在听 / 转写中 / 丢弃原因）。
+
 ## [0.3.74] - 2026-11-08 · 两个输入圆按钮的底色跟着窗口风格走
 
 ### Changed

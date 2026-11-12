@@ -256,6 +256,15 @@ export function createRunner({
   scoreNormalize = true,
 } = {}) {
   let pipeline = null;   // 当前（或刚停的）引擎 —— 停采集后仍留着，好把队列里剩的图发完
+  /**
+   * 出图序号的基础值（**跨管线累加**）。
+   *
+   * `pipeline.stats.sheets` 每根管线各记各的，可 `loop.js` 把 `status().sheets`
+   * 当成"这一张叫过没有"的判重键（`#N`）。换清晰度 / 改 region / 换模式都会新建
+   * 一根管线、序号从 0 再来 —— 新管线的第 1 张恰好等于刚叫过的 `#1`，于是这张图
+   * 明明进了队列却没人叫醒（静止画面上可能几十秒没动静）。
+   */
+  let sheetBase = 0;
   let running = false;
   let run = null;
   let source = null;
@@ -530,11 +539,31 @@ export function createRunner({
     indicatorStopTimer.unref?.();
   }
 
+  /**
+   * 只回传**能序列化**的管线参数。
+   *
+   * `pipeline.constants` 是整个 options 对象，里面有 `audio.levels` 这个**函数**。
+   * 任何把它原样塞进工具返回值的地方，宿主序列化时都会报
+   * `value is not lossless JSON`，整个调用直接失败 —— `see_now({action:"start"})`
+   * 实测就是这么挂在"明明已经开始采集了、工具却报错"上的。
+   */
+  function briefParams(p) {
+    const c = p?.constants ?? {};
+    return { width: c.width ?? null, height: c.height ?? null, fps: c.fps ?? null };
+  }
+
   function teardown(why) {
     if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
     // 采集停了，屏幕上的"有人在看"也该跟着灭
     stopIndicatorSoon();
     run?.stop();
+    /**
+     * 流结束了，管道里可能还剩 1~2 帧没到"3 帧一箱"的门槛 —— 把它们封成最后一张
+     * 放回队列，否则**每次收尾尾部那批帧永远不出图**（文件放完尤其明显：
+     * 紧接着还被 `endedSource` 硬闸挡住，之后再也没有 flush 的机会）。
+     * 收尾失败不许影响"停"这件事。
+     */
+    try { pipeline?.finish?.(); } catch (e) { log(`收尾封箱失败：${e?.message ?? e}`); }
     run = null;
     running = false;
     source = null;
@@ -678,10 +707,24 @@ export function createRunner({
     lastError = null;
     // 换了一根管道：上一根预留的图跟着作废（它属于旧管线的时间窗，交出去只会更旧）
     dropReserved();
+    // 出图序号接着上一根数（见 `sheetBase` 的说明），否则热切换后第 1 张会被当成"叫过的"
+    sheetBase += pipeline?.stats?.sheets ?? 0;
     pipeline = p;
     running = true;
     source = s;
     lastSource = s;
+    /**
+     * 文件源一开播就要报"播放中"。
+     *
+     * 以前只有 `pause`/`resume`/`seek` 会改 `playbackState`，直接 `start` 一个文件
+     * （或 `seek` 之后）窗上一直显示"已停止 / 第 0 秒" —— 实际早就在放了。
+     * 位置按起点报（逐帧推进需要 realtime 时钟，不在这一处做）。
+     */
+    if (s.kind === 'file') {
+      playbackState = 'playing';
+      playbackPosition = Number(s.seek) || 0;
+      publishPlayback();
+    }
     startedAt = Date.now();
     // portal 和 ffmpeg 共用同一套逐帧回调：上游（判帧/拼图）根本不区分帧从哪来。
     const portal = engine === 'portal';
@@ -738,17 +781,22 @@ export function createRunner({
       });
       if (ok) {
         sink = p;
+        // 同上：热切换也换了一根管线，序号要接着数
+        sheetBase += pipeline?.stats?.sheets ?? 0;
         pipeline = p;
         quality = wantQuality;
         source = s;
         lastSource = s;
         runOpts = { ...opts };
+        // 和正常路径（:673-674）保持一致：`oneShot` 是"这一次调用"的，不能记进管线参数 ——
+        // 记进去之后 `modeChanged` 恒为真，下一轮 watch 会把刚热切换好的管线整个拆了重开。
+        delete runOpts.oneShot;
         startedAt = Date.now();
         frames = 0;
         lastError = null;
         dropReserved();
         log(`热切换：${p.constants.width}×${p.constants.height}（不重开会话）`);
-        return { started: true, hotSwapped: true, source: s, engine, quality, params: p.constants };
+        return { started: true, hotSwapped: true, source: s, engine, quality, params: briefParams(p) };
       }
       log('热切换失败（worker 不收 update），退回重开采集');
     }
@@ -822,7 +870,7 @@ export function createRunner({
     // 探针已经试出来了，这里把它带回去，让模型（和用户）知道该去系统设置，而不是以为插件坏了。
     const warning = s.kind === 'screen' ? screenEngineWarning() : null;
     if (warning) log(`⚠️ ${warning}`);
-    return { started: true, source: s, engine, quality, params: p.constants, warning };
+    return { started: true, source: s, engine, quality, params: briefParams(p), warning };
   }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -862,21 +910,31 @@ export function createRunner({
       return { ok: false, reason: 'invalid-position', text: PLAYBACK_REASONS['invalid-position'], playback: playback() };
     }
     if (source?.kind !== 'file') return { ok: false, reason: 'not-file', text: PLAYBACK_REASONS['not-file'], playback: playback() };
+    /**
+     * ⚠️ **必须在 `teardown()` 之前把 source 拿在手里。**
+     * `teardown()` 会 `source = null`（:540），而下面要拿它拼新的 src ——
+     * 以前这里是 `{ ...source, seek }`，展开 null 得到 `{ seek }`：没有 kind/path，
+     * `spawnFrames` 直接抛 `unknown source kind: undefined`，而 `start()` 已经把
+     * `running` 置成 true 且不回滚 ⇒ 之后每条 watch 都卡在"采集中"状态干等超时。
+     */
+    const prev = source;
     // 跳转要**真的重开采集**：ffmpeg 已经按旧起点在解码，光改状态不会让画面变。
     await teardown('seek');
     playbackPosition = position;
     playbackState = 'playing';
-    await start({ src: { ...source, seek: position }, quality, restart: true });
+    await start({ src: { ...prev, seek: position }, quality, restart: true });
     publishPlayback();
     return { ok: true, text: `已跳转到 ${position}s。`, playback: playback() };
   }
 
   async function configure(options = {}) {
     if (source?.kind !== 'file') return { ok: false, reason: 'not-file', text: PLAYBACK_REASONS['not-file'], playback: playback() };
+    // 同上：teardown 会把 source 清成 null，先留一份再重开
+    const prev = source;
     // 「不改档位」= 保持当前档位，而不是打回默认档。
     const next = options.quality ?? quality;
     await teardown('configure');
-    await start({ src: source, quality: next, restart: true });
+    await start({ src: prev, quality: next, restart: true });
     publishPlayback();
     return { ok: true, text: `清晰度已切到 ${next}。`, playback: playback() };
   }
@@ -952,6 +1010,15 @@ export function createRunner({
     async watch({
       seconds = 300, minFrames = 1, src: reqSrc = null, quality: q = null, opts = {},
       /**
+       * 调用方**亲口说了**要看什么吗（`source` / `path` / `url`）。
+       *
+       * 不能从 `reqSrc.kind` 反推：`srcOf()` 会把"只传了 region"补成
+       * `{kind:'screen'}`，于是"换一块看"被当成"用户重新要求看" —— 下面那道
+       * 挂断硬闸被绕过，刚被关掉的窗又弹出来（实报的"关不掉，只能卸载"）。
+       * `undefined` = 老调用方，退回按 `reqSrc.kind` 判。
+       */
+      explicitSource = undefined,
+      /**
        * 只看屏幕上的某一块：`{x,y,w,h}` 用这块，`null` 显式取消，`undefined` 不干预。
        *
        * **跟 `src` 分开传**：region 不算"显式来源"。下面那道挂断硬闸是给
@@ -973,7 +1040,9 @@ export function createRunner({
        * 从头再放一遍，对关过窗的用户意味着"我刚关掉它又弹出来了"。
        * 所以：只有**显式传了来源**（用户明确说要看什么）才允许清闸重开。
        */
-      const explicitSrc = Boolean(reqSrc && reqSrc.kind);
+      const explicitSrc = explicitSource === undefined
+        ? Boolean(reqSrc && reqSrc.kind)
+        : Boolean(explicitSource);
 
       /**
        * region 落到"这次要抓的那个源"上。
@@ -1169,6 +1238,13 @@ export function createRunner({
             if (signal?.aborted) {
               return { ok: false, reason: 'cancelled', waited: (Date.now() - t0) / 1000 };
             }
+            /**
+             * 阻塞期间用户可能把窗关掉了 —— 常驻循环的 `window-closed` 分支会调
+             * `hangUp()`，但那道闸只在入口检查过一次。不在这里复查的话，这一轮要么
+             * 交出一张旧图 `ok:true`，要么退到超时分支 `flushNow` 再返回 `ok:true`，
+             * 上层（index.js）会当成"还在看"并把常驻循环重建起来 —— 下一拍才发现窗没了。
+             */
+            if (hungUp) return { ok: false, reason: 'hung-up', waited: (Date.now() - t0) / 1000 };
             // **插话优先于一切**：用户说话了就立刻截断，不等判据、不排队
             const said = pollUser();
             if (said) return await interjectNow(said);
@@ -1178,7 +1254,21 @@ export function createRunner({
             //
             // 超省模式下这里会一次拿到多张（`wakeBatch`）。**这是省钱的唯一入口** ——
             // 一次交 N 张 = 模型一轮看完；一张张交 = N 轮，每轮都要重过一遍上下文。
-            const got = takeSheets('watch').filter((x) => x.frames.length >= minFrames);
+            /**
+             * ⚠️ **先看帧数，再把不够的放回去。**
+             *
+             * `takeSheets()` 是 take-out 语义（`pipeline.take()` 就是 `shift()`），
+             * 以前这里 `takeSheets().filter(...)`：不够 `minFrames` 的图既没交付、
+             * 也没回队列 —— **凭空消失**，`takes.watch` 还记了一次"取到了"。
+             * 静止屏幕的单帧、oneShot 首帧、region 单帧都会落进这一档。
+             */
+            const taken = takeSheets('watch');
+            const got = taken.filter((x) => x.frames.length >= minFrames);
+            if (got.length < taken.length) {
+              const small = taken.filter((x) => x.frames.length < minFrames);
+              // 倒序放回：`restore()` 是 unshift，正序会把这批的顺序整个翻过来
+              for (let i = small.length - 1; i >= 0; i -= 1) pipeline?.restore?.(small[i]);
+            }
             if (got.length) {
               /**
                * **出图前等最多 300ms，让"最后一句话"赶上这张图。**
@@ -1302,7 +1392,7 @@ export function createRunner({
         takes: { ...takes },
         // 出图序号（单调递增）：常驻循环靠它保证"同一张图只叫醒一次"。
         // `pending` 只说明"队列里有"，不说明"是不是新的一张"—— 模型不取的话它一直是 1。
-        sheets: pipeline?.stats?.sheets ?? 0,
+        sheets: sheetBase + (pipeline?.stats?.sheets ?? 0),
         // 本批第一帧到现在多久：唤醒文案里要说"攒了多久"，不然模型不知道这段时间有多长
         secondsSinceWake: pipeline?.secondsSinceWake ?? null,
         // 这一轮开过窗没有（循环靠它区分"用户关了窗" 和 "窗压根没开起来"）

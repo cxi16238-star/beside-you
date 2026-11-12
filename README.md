@@ -1,4 +1,4 @@
-# Her Company（her-company）· 带上她的眼睛
+# Beside You（beside-you）· 带上她的眼睛
 
 > **AI 不再"听你描述屏幕"，而是自己看 —— 而且只传"画面变了"的那几帧。**
 
@@ -8,7 +8,7 @@
 
 > **核心图像技术来自 [SAOS-3624/dsh-see-now](https://github.com/SAOS-3624/dsh-see-now)**：
 > 采集、切点判定、积分留帧、档位拼图这条链路是 see-now 的完整实现。这一版是它的
-> **整包 fork**（基于 0.2.0，包名 `her-company`），不是补丁：装它就够了，**不要再装官方版**
+> **整包 fork**（基于 0.2.0，包名 `beside-you`），不是补丁：装它就够了，**不要再装官方版**
 > （两个包抢同一个 `see_now` 工具）。
 
 ---
@@ -24,6 +24,30 @@
     你说话的内容会直接进会话；不想打字时用它；
   - **播报**：Agent 的 `say` 是唯一会被念出来、并以气泡弹出的通道 —— 手在忙（打游戏、
     做饭、开车）时让它用 `say` 播报，不用盯着屏幕。
+
+### 陪看的规则：`watch`、`peek`、什么时候会自己停
+
+**两个取画面的动作，别用错：**
+
+| | 用途 | 行为 |
+|---|---|---|
+| `watch` | **陪看**：用户说"一起看 / 继续看" | 阻塞，攒够一张新画面就返回；**返回后要再调一次才算接着看** |
+| `peek` | **看一眼**：插件叫醒你（"有新画面了"）、或只想确认当前屏幕 | 立刻返回已有的图，不阻塞、不改变陪看状态 |
+
+- 别把 `watch` 当轮询用：两次看之间至少隔 ~10 秒；`peek` 不受这个限制。
+- 收到"挂断 / 收工"的提示之后，**不要再自己调 `see_now`**，等用户开口。
+
+**陪看会自己停 —— 停了必须告诉用户。** 停掉的情况有五种：
+
+1. **用户关掉悬浮窗** → 立即挂断（`window-closed`）；
+2. **悬浮窗没开**、且用户超过 `idleStopMin` 分钟没说话（默认 **3 分钟**）→ 收工（`idle`）；
+3. 连续 `maxAutonomousWakes` 次自动叫醒都没人回应（默认 **8 次**）→ 收工（`idle`）；
+4. 放的是本地视频、**视频放完了** → 收工（`ffmpeg-exit`）；
+5. 用户按了快捷键 / 点了标题栏的停止 → 手动收工。
+
+第 2、3 条的阈值可以改（`~/.dsh/see-now.json`，或看 `see_now({action:"status"})` 里
+"收工线"那一行）。**Agent 拿到收工结果后，必须在下一次 `say` 里说清楚**
+（例："陪看已经停了，要继续就说一声"），不能装作还在看。
 
 ---
 
@@ -64,18 +88,18 @@
 dsh plugin --profile desktop remove dsh-see-now
 
 # 2. 装这一版
-dsh plugin --profile desktop add /下载目录/her-company-0.13.11.tgz
+dsh plugin --profile desktop add /下载目录/beside-you-0.14.0.tgz
 
 # 3. 重启 DSH，设置里会多出「带上她的眼睛」这一页
 ```
 
 **装完必须重启一次**：`see_now` 工具是热挂上的，但设置页那一栏要等页面重新加载才出现。
 
-万一重启后 DSH 起不来（窗口显示 `web boot: 1 entry did not activate` / `her-company: import failed`），先把插件摘掉再装一次：
+万一重启后 DSH 起不来（窗口显示 `web boot: 1 entry did not activate` / `beside-you: import failed`），先把插件摘掉再装一次：
 
 ```bash
-dsh plugin --profile desktop remove her-company
-dsh plugin --profile desktop add /下载目录/her-company-0.13.11.tgz
+dsh plugin --profile desktop remove beside-you
+dsh plugin --profile desktop add /下载目录/beside-you-0.14.0.tgz
 ```
 
 DSH 自己也会在恢复模式里把出问题的插件摘掉，并把原配置备份到 `~/.dsh/recovery/`。

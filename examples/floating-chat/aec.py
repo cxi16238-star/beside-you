@@ -113,23 +113,122 @@ class FdafAec:
 
 
 def find_loopback_device(candidates=None):
-    """找"电脑在放什么"那条回环通道。
+    """找"电脑在放什么"那条回环通道（sounddevice 版，老的退路）。
 
     优先"扬声器/喇叭/Speakers/Loopback"，其次"立体声混音/Stereo Mix"。
     **不要**用会含麦克风的混音通道 —— 那会把你的声音也一起减掉。
+
+    ⚠️ PortAudio 官方**看不到** WASAPI loopback，所以这里能找到的多半是
+    "立体声混音"之类。优先用下面的 `LoopbackRef`（pyaudiowpatch）。
+    虚拟声卡（Steam / VB-Cable / VoiceMeeter…）一律跳过：它们不是"扬声器实际
+    放出来的声音"，打开后当参考会把用户自己的声音减掉。
     """
     import sounddevice as sd
 
-    prefer = candidates or ["扬声器", "喇叭", "speaker", "loopback", "what u hear",
-                            "立体声混音", "stereo mix", "混音"]
+    prefer = candidates or ["立体声混音", "stereo mix", "what u hear", "loopback",
+                            "扬声器", "喇叭", "speaker"]
+    BLOCK = ("steam", "virtual", "vb-audio", "voicemeeter", "cable", "wave out")
     best = None
     for i, d in enumerate(sd.query_devices()):
         if d.get("max_input_channels", 0) <= 0:
             continue
         name = (d.get("name") or "").lower()
+        if any(b in name for b in BLOCK):
+            continue
         for rank, key in enumerate(prefer):
             if key.lower() in name:
                 if best is None or rank < best[0]:
                     best = (rank, i, d.get("name"))
                 break
     return (best[1], best[2]) if best else (None, None)
+
+
+class LoopbackRef:
+    """用 pyaudiowpatch 抓「电脑正在放什么」（WASAPI loopback），当 AEC 的参考信号。
+
+    为什么不用 sounddevice：PortAudio 官方不暴露 WASAPI loopback，
+    `sd.query_devices()` 里只有真实输入设备。老代码靠 "speaker" 关键字撞上了
+    "Steam Streaming Speakers Wave" 这种虚拟输入 —— 打不开（WDM-KS 不支持阻塞 API），
+    就算打开了，它装的也不是扬声器实际输出，反而可能把用户自己的声音当参考减掉。
+
+    pyaudiowpatch（PyAudioWPatch）是打了补丁的 PortAudio，能列出 `... [Loopback]`。
+    这里开一条后台回调流，把声音降成 16k 单声道丢进队列，主循环按 512 样本取。
+    取不到的时候补零：宁可这一拍少消一点回声，也不能卡住麦克风。
+    """
+
+    def __init__(self, index=None, dst_rate=16000, chunk=512):
+        import queue
+
+        import pyaudiowpatch as pa
+
+        self._np = np
+        self.dst_rate = int(dst_rate)
+        self.chunk = int(chunk)
+        self.p = pa.PyAudio()
+        self.q = queue.Queue(maxsize=64)
+        self._pend = np.zeros(0, dtype=np.float32)
+
+        info = None
+        if index is not None:
+            info = self.p.get_device_info_by_index(int(index))
+        else:
+            wasapi = self.p.get_host_api_info_by_type(pa.paWASAPI)
+            out = self.p.get_device_info_by_index(wasapi["defaultOutputDevice"])
+            out_name = str(out.get("name") or "")
+            for lb in self.p.get_loopback_device_info_generator():
+                if out_name and out_name in str(lb.get("name") or ""):
+                    info = lb
+                    break
+            if info is None:
+                info = next(self.p.get_loopback_device_info_generator(), None)
+        if info is None:
+            raise RuntimeError("没有可用的 loopback 设备")
+
+        self.index = int(info["index"])
+        self.name = str(info.get("name") or "")
+        self.rate = int(round(float(info["defaultSampleRate"])))
+        self.ch = max(1, int(info.get("maxInputChannels") or 1))
+        self.stream = self.p.open(
+            format=pa.paFloat32, channels=self.ch, rate=self.rate,
+            input=True, input_device_index=self.index,
+            frames_per_buffer=self.chunk, stream_callback=self._cb,
+        )
+        self.stream.start_stream()
+
+    def _cb(self, in_data, frame_count, time_info, status):
+        x = self._np.frombuffer(in_data, dtype=self._np.float32)
+        if self.ch > 1:
+            x = x.reshape(-1, self.ch).mean(axis=1)
+        if self.rate != self.dst_rate and len(x) > 1:
+            n_out = max(1, int(round(len(x) * self.dst_rate / self.rate)))
+            x = self._np.interp(self._np.linspace(0, len(x) - 1, n_out),
+                                self._np.arange(len(x)), x).astype(self._np.float32)
+        try:
+            self.q.put_nowait(x)
+        except Exception:
+            pass                                  # 队列满了就丢：参考信号晚到没用
+        return (None, 0)                          # paContinue
+
+    def read(self, n=None):
+        n = int(n or self.chunk)
+        out = self._pend
+        while len(out) < n:
+            try:
+                out = np.concatenate([out, self.q.get(timeout=0.02)])
+            except Exception:
+                break
+        if len(out) < n:
+            out = np.concatenate([out, np.zeros(n - len(out), dtype=np.float32)])
+        self._pend = out[n:]
+        return out[:n].copy()
+
+    def close(self):
+        try:
+            self.stream.stop_stream()
+            self.stream.close()
+        except Exception:
+            pass
+        try:
+            self.p.terminate()
+        except Exception:
+            pass

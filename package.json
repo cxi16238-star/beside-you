@@ -1,8 +1,8 @@
 {
-  "name": "her-company",
-  "version": "0.13.11",
+  "name": "beside-you",
+  "version": "0.14.0",
   "icon": "./icon.svg",
-  "description": "dsh-see-now 的加强版：在原版「看屏幕、只传变了的帧」之上加了小窗会话绑定、自定义快捷键、焦点暂停与自动续看、静音与音量、背景透明度。· Fork of dsh-see-now with session binding, global hotkey, focus pause, volume and opacity.",
+  "description": "Beside You（带上她的眼睛）：陪你看屏幕、听你说话、用声音回你的小窗 —— 在原「看屏幕、只传变了的帧」之上加了会话绑定、全局快捷键、焦点暂停与自动续看、静音与音量、背景透明度、本地语音输入（SenseVoice）与实时转写预览。Fork of dsh-see-now 0.2.0.",
   "keywords": [
     "dsh",
     "dsh-plugin",

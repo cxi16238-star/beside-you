@@ -341,6 +341,10 @@ export function windowHidden(env = process.env) {
   // **遗留状态必须顺手改回去**：Python 侧只认 `hidden` 字段，这里"当它没藏"
   // 并不会让窗口出现 —— 那就成了最坏的一种：Node 说"显示中"，屏幕上什么都没有。
   // 写一次之后文件就是 hidden:false，下次直接走上面的早退。
+  //
+  // 2026-11-12 用户确认：**他没有设计"隐藏档"这个功能**，所以盘上的 `hidden:true`
+  // 只可能是上一代会话残留 —— 无条件自愈才是对的。（曾经想"心跳新鲜就尊重它"，
+  // 但那会让残留状态永久藏住一个活着的窗，正是 issue #32 第 1 点。）
   try { setWindowHidden(false, { env }); } catch { /* 只读盘也照常回答 */ }
   return false;
 }
@@ -851,10 +855,18 @@ export function acceptWindowProtocol(record, line) {
   if (message?.version !== PROTOCOL_VERSION || typeof message.state !== 'string') return;
   record.state = message.state;
   record.reason = typeof message.reason === 'string' ? message.reason : null;
-  if (message.state === 'ready') record.ready(record);
+  /**
+   * ⚠️ `record.ready(值)` 解的是 `openWindow` 里那个 Promise.race，而那边的语义是
+   * **"有值 = 死了，null = 起来了"**（`if (dead) { …换下一个解释器… }`）。
+   * 以前 ready 也传 `record`（真值），于是一个 700ms 内报 ready 的协议窗口会被判成
+   * 启动失败、去 spawn 下一个解释器，reason 写成 "code=undefined"、pid 也不写。
+   * 现在协议通道线上没启用（调用方都没传 onCommand/signal），所以这个坑还没炸；
+   * 但值必须按约定的语义给。
+   */
+  if (message.state === 'ready') record.ready(null);
   if (message.state === 'closed' || message.state === 'failed') {
     record.reason ??= message.state;
-    record.ready(record);
+    record.ready({ code: null, reason: message.state });
   }
   if (message.command && COMMANDS.has(message.command)) {
     const { version, ...command } = message;
@@ -919,7 +931,45 @@ export function windowAlive() {
  *
  * @returns {{ok:boolean, script?:string, python?:string, from?:string, reason?:string, already?:boolean}}
  */
-export async function openWindow({ force = false, log = () => {}, settleMs = 700, script: forced = null,
+/**
+ * 这个 pid 已经不是我们的窗了吗？
+ *
+ * 窗口被用户点 × 关掉时**不会删** `~/.dsh/see-now-window.pid`（那是 Node 写的，
+ * Python 侧不知道这个路径），pid 就留在盘上；Windows 很快会把它复用给别的进程。
+ * 之后 `openWindow({force:true})` 直接 `process.kill(old)` 就是 TerminateProcess
+ * 一个无关进程 —— 不可挽回。
+ *
+ * 查不了就**按老行为**（返回 false = 不当外人），只拦"明确认出不是解释器"的。
+ */
+function foreignProcess(pid) {
+  if (process.platform !== 'win32') return false;
+  try {
+    const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'],
+      { encoding: 'utf8', windowsHide: true, timeout: 3000 });
+    if (r?.status !== 0) return false;
+    const out = String(r.stdout ?? '').trim();
+    if (!out) return true;                 // 进程已经不在了
+    return !/python/i.test(out);           // 明确认出不是解释器才拦
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 并发闸：从 `windowAlive()` 为假到 pid 写盘之间至少 700ms（还要跑一次同步的
+ * `pythonProbe`），这期间再来一次调用就会**再 spawn 一个** —— 两个悬浮窗叠着，
+ * pid 文件只记得后一个，前一个连 `closeWindow()`/`hangUp()` 都杀不到（它只靠
+ * `DSH_HOST_PID` 在宿主退出时自杀）。热键两把关、热键与 `startWatching` 并发都会踩。
+ */
+let opening = null;
+
+export function openWindow(opts = {}) {
+  if (opening) return opening;
+  opening = doOpenWindow(opts).finally(() => { opening = null; });
+  return opening;
+}
+
+async function doOpenWindow({ force = false, log = () => {}, settleMs = 700, script: forced = null,
   onCommand = null, signal = null,
 } = {}) {
   if (process.env.DSH_SEE_NO_WINDOW === '1') return { ok: false, reason: 'disabled' };
@@ -929,10 +979,23 @@ export async function openWindow({ force = false, log = () => {}, settleMs = 700
   // 先把上一次那个进程收掉，否则会叠出两个窗口，而用户只看得见一个。
   try {
     const old = Number(readFileSync(pidPath(), 'utf8').trim());
-    if (Number.isInteger(old) && old > 0 && old !== process.pid) {
+    if (Number.isInteger(old) && old > 0 && old !== process.pid && !foreignProcess(old)) {
       try { process.kill(old); } catch { /* 已经没了 */ }
     }
   } catch { /* 没有 pid 文件，正常首次启动 */ }
+
+  /**
+   * ⚠️ **必须清掉上一代窗口留下的心跳文件。**
+   *
+   * `windowAlive()` 用心跳 mtime 判"这窗还能用吗"。新进程 spawn 之后到 Python
+   * 第一次 touch 心跳之间隔着一整套启动（解释器 + tkinter/numpy import，常常
+   * 超过 `settleMs=700`），而这段窗口期里盘上躺着的还是**上一代**的心跳 ——
+   * 早就过期了。调用方紧接着的 `if (!windowAlive())` 于是判"没开悬浮窗"：
+   * 窗口 1 秒后明明出现在屏幕上，陪看却已经放弃（热键路径还会把它 kill 掉重开）。
+   *
+   * 删掉之后 `windowAlive()` 走"没有心跳文件就信任 pid"那条兼容分支，行为才对。
+   */
+  try { unlinkSync(heartbeatPath()); } catch { /* 没有心跳文件，正常首次启动 */ }
 
   const { script, from } = forced
     ? { script: forced, from: '调用方指定' }

@@ -259,11 +259,20 @@ export function createCompanion({
       });
 
       proc.on('error', (err) => {
+        // 迟到的错误事件（老的 proc 已经被新的替换掉了）不该动共享状态，
+        // 否则会把刚起来那个进程的清成"没在跑"。
+        if (child !== proc) return;
         childExited = true;
         fail(`spawn 失败（${err?.code ?? err?.message ?? err}）`);
       });
 
       proc.on('exit', (code, signal) => {
+        // ⚠️ 必须校验"这是不是当前那个进程"：stop() 之后很快 start()（restart、
+        // 快速改配置）时，老进程的 exit 会晚一步赶到。无条件 child = null 会把
+        // **新**进程的引用抹掉（之后 stop() 看不到它 → 孤儿进程），childExited = true
+        // 又会让 setConfig 以为没在跑（→ 再 spawn 一个），而 quitRequested 已被
+        // start() 重置成 false，于是还会走重启分支，几次之后直接判"反复退出"。
+        if (child !== proc) return;
         childExited = true;
         child = null;
         if (quitRequested) {

@@ -488,7 +488,8 @@ export function startLoop({
           + lastSaidHint() + muteNote()
         : `[看屏幕] 有新画面了（这一张攒了 ${st.secondsSinceWake ?? '?'} 秒）。\n`
           + '调 `see_now({action:"peek"})` 拿图看一眼，然后：值得说就用 `say` 说一句，'
-          + '不值得说就什么都别做（沉默是允许的，别为了刷存在感而说话）。'
+          + '不值得说就什么都别做（沉默是允许的，别为了刷存在感而说话）。\n'
+          + '看完顺手问一句：这一段有没有什么感想想写进日记？有就丢进 小秘密/日记/当天文件上半「零碎记录」，一句话就行；没有可以不写。'
           + lastSaidHint() + muteNote();
 
       /**
