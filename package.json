@@ -118,11 +118,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cxi16238-star/her-company.git"
+    "url": "git+https://github.com/cxi16238-star/beside-you.git"
   },
-  "homepage": "https://github.com/cxi16238-star/her-company",
+  "homepage": "https://github.com/cxi16238-star/beside-you",
   "bugs": {
-    "url": "https://github.com/cxi16238-star/her-company/issues"
+    "url": "https://github.com/cxi16238-star/beside-you/issues"
   },
   "bin": {
     "dsh-see-window": "bin/see-window.mjs"
