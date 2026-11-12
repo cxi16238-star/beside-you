@@ -1,6 +1,6 @@
-// 把 her-company 推到 GitHub，并发一个带 tgz 附件的 Release。
+// 把 beside-you 推到 GitHub，并发一个带 tgz 附件的 Release。
 //
-// 用法：node scripts/publish-github.mjs --token github_pat_xxx [--repo her-company] [--private]
+// 用法：node scripts/publish-github.mjs --token github_pat_xxx [--repo beside-you] [--private]
 //
 // 为什么是 .mjs 不是 .ps1：这台机器 PowerShell 5.1 的执行策略 + here-string 解析
 // 都不配合，中文字面量过一遍 shell 还会乱码。Node 里 fetch + execFile 一次到底。
@@ -27,13 +27,13 @@ if (!token || token === true) {
   console.error('用法：node scripts/publish-github.mjs --token <PAT> [--repo <名字>] [--private]');
   process.exit(2);
 }
-const repoName = String(arg('repo', 'her-company'));
+const repoName = String(arg('repo', 'beside-you'));
 const isPrivate = arg('private', false) === true;
 
 const headers = {
   Authorization: `Bearer ${token}`,
   Accept: 'application/vnd.github+json',
-  'User-Agent': 'her-company',
+  'User-Agent': 'beside-you',
   'X-GitHub-Api-Version': '2022-11-28',
 };
 
@@ -74,7 +74,7 @@ if (existing.ok) {
 } else {
   const created = await call('POST', '/user/repos', {
     name: repoName,
-    description: 'her-company（带上她的眼睛）：DSH 屏幕陪看插件。核心图像技术来自 dsh-see-now；小窗绑定会话 / 全局快捷键 / 语音输入与播报 / 焦点暂停 / 气泡与玻璃悬浮窗',
+    description: 'beside-you（带上她的眼睛）：DSH 屏幕陪看插件。核心图像技术来自 dsh-see-now；小窗绑定会话 / 全局快捷键 / 语音输入与播报 / 焦点暂停 / 气泡与玻璃悬浮窗',
     private: isPrivate,
     has_issues: true,
   });
@@ -100,13 +100,13 @@ if (!existsSync(join(HERE, '.git'))) {
   git(['init', '-q', '-b', 'main']);
   console.log('已 git init');
 }
-const ident = ['-c', 'user.name=her-company', '-c', 'user.email=plus@localhost'];
+const ident = ['-c', 'user.name=beside-you', '-c', 'user.email=plus@localhost'];
 git(['add', '-A']);
 const staged = (() => {
   try { return git(['diff', '--cached', '--name-only']).trim(); } catch { return ''; }
 })();
 if (staged) {
-  git([...ident, 'commit', '-q', '-m', `her-company ${version}`]);
+  git([...ident, 'commit', '-q', '-m', `beside-you ${version}`]);
   console.log(`已提交 ${staged.split('\n').length} 个文件`);
 } else {
   console.log('没有新改动需要提交');
@@ -123,7 +123,7 @@ console.log(`已推送：https://github.com/${full}`);
 
 // Release
 const notes = [
-  '**her-company（带上她的眼睛）** —— `dsh-see-now` 的整包 fork，核心图像技术（采集 / 切点判定 / 拼图 / 档位）来自 [SAOS-3624/dsh-see-now](https://github.com/SAOS-3624/dsh-see-now)。装上就是这一版，**不要再装官方版** —— 两个包会抢同一个 `see_now` 工具。',
+  '**beside-you（带上她的眼睛）** —— `dsh-see-now` 的整包 fork，核心图像技术（采集 / 切点判定 / 拼图 / 档位）来自 [SAOS-3624/dsh-see-now](https://github.com/SAOS-3624/dsh-see-now)。装上就是这一版，**不要再装官方版** —— 两个包会抢同一个 `see_now` 工具。',
   '',
   '### 给 Agent 的须知',
   '',
@@ -152,7 +152,7 @@ const notes = [
   '',
   '```bash',
   'dsh plugin --profile desktop remove dsh-see-now        # 先卸官方版',
-  `dsh plugin --profile desktop add her-company-${version}.tgz`,
+  `dsh plugin --profile desktop add beside-you-${version}.tgz`,
   "# 然后重启 DSH：设置里多出「带上她的眼睛」这一页",
   '```',
   '',
@@ -167,7 +167,7 @@ if (rel.ok) {
 } else {
   rel = await call('POST', `/repos/${full}/releases`, {
     tag_name: tag,
-    name: `her-company ${version}`,
+    name: `beside-you ${version}`,
     body: notes,
     draft: false,
     prerelease: false,
@@ -179,7 +179,7 @@ if (rel.ok) {
   console.log(`已发 Release：${rel.json.html_url}`);
 }
 
-const tgz = join(HERE, `her-company-${version}.tgz`);
+const tgz = join(HERE, `beside-you-${version}.tgz`);
 if (existsSync(tgz)) {
   const bytes = readFileSync(tgz);
   const res = await fetch(

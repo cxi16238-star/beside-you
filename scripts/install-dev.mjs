@@ -25,7 +25,7 @@ const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
 const PROFILE = process.env.DSH_PROFILE || 'desktop';
 const PROFILE_DIR = join(DSH_HOME, 'profiles', PROFILE);
 const MODULES = join(PROFILE_DIR, 'node_modules');
-const PKG_NAME = 'her-company';
+const PKG_NAME = 'beside-you';
 
 // `.tmp` 要跳过（调试产物、被占用的文件会让 cp 中途失败）；
 // `debug` 是开发期的调试窗，**不进插件**（也故意不写进 package.json 的 files）。

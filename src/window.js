@@ -1035,7 +1035,7 @@ async function doOpenWindow({ force = false, log = () => {}, settleMs = 700, scr
           DSH_HOST_PID: String(process.pid),
           // 启动失败时那个 MessageBox 的标题跟着走，否则用户看到
           // "dsh-watch-together" 会以为自己装错了包（issue #32 第 1 条）
-          DSH_WINDOW_BRAND: 'her-company',
+          DSH_WINDOW_BRAND: 'beside-you',
         },
       });
     } catch (e) {

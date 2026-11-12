@@ -31,7 +31,7 @@ window.__ModuleLoader__.load({
   // fork 改名之后这里也必须跟着改：名字如果还对不上 `dsh-see-now-plus`，`arrive()`
   // 找不到 factory 就会拿备用 URL 再执行一遍同一个脚本，第二次 `register` 直接抛
   // `duplicate factory registration` —— 整页启动失败（v0.3.0 第一次装就是这么挂的）。
-  id: 'her-company',
+  id: 'beside-you',
   factory: require => {
     const module = { exports: {} };
     const exports = module.exports;
@@ -1814,11 +1814,11 @@ const UI_FALLBACK = Object.freeze({
     function apply(ctx) {
       ctx.effect(() => {
         const style = document.createElement('style');
-        style.setAttribute('data-plugin', 'her-company');
+        style.setAttribute('data-plugin', 'beside-you');
         style.textContent = CSS;
         document.head.appendChild(style);
         return () => style.remove();
-      }, 'her-company: styles');
+      }, 'beside-you: styles');
 
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',
@@ -1864,7 +1864,7 @@ const UI_FALLBACK = Object.freeze({
 
     exports.apply = apply;
     exports.inject = inject;
-    exports.name = 'her-company';
+    exports.name = 'beside-you';
     exports.__test = { draftOf, mergeValues, patchOf, num, TEXT, localDraftOf, localPatchOf, shouldShowLocal,
       hotkeyText, keyNameOf };
     return module.exports;

@@ -95,7 +95,7 @@ function srcOf(args) {
   return { src: out };
 }
 
-export const name = 'her-company';
+export const name = 'beside-you';
 
 /**
  * `watch` 最多阻塞多久。
@@ -579,7 +579,7 @@ export async function apply(ctx) {
     return await registerAll(ctx);
   } catch (e) {
     // 最坏的情况是插件不能用，不是应用起不来
-    try { ctx?.logger?.error?.(`[her-company] failed to load: ${e?.stack ?? e}`); } catch { /* ignore */ }
+    try { ctx?.logger?.error?.(`[beside-you] failed to load: ${e?.stack ?? e}`); } catch { /* ignore */ }
     /**
      * **失败必须留痕。** 以前只打 logger.error —— 那玩意儿只在开发者工具里，
      * 用户看到的现象是"这个会话根本没有 see_now 这个工具"，模型只能靠读文件猜，
@@ -624,7 +624,7 @@ function installSettings(ctx, log, hooks = {}) {
             path: ROUTE_PREFIX,
             handler: (req, res) => handle(req, res, readConnection(scoped)),
           }),
-        'her-company: settings routes',
+        'beside-you: settings routes',
       );
     });
   } catch (e) {
@@ -656,7 +656,7 @@ function writeLoadError(e) {
 async function registerAll(ctx) {
   const defineTool = await loadDefineTool();
   const disposers = [];
-  const log = (m) => { try { ctx?.logger?.info?.(`[her-company] ${m}`); } catch { /* ignore */ } };
+  const log = (m) => { try { ctx?.logger?.info?.(`[beside-you] ${m}`); } catch { /* ignore */ } };
 
   // DSH 桌面版把 ffmpeg 放在 `~/.dsh/tools/ffmpeg/bin`，**不进 PATH**。
   // 写裸 'ffmpeg' 在 macOS 上就是 ENOENT，而且会伪装成"插件坏了"。
